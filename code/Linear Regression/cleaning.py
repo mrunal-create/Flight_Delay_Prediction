@@ -52,7 +52,7 @@ spark = SparkSession.builder \
     .appName('Optimized Data Cleaning') \
     .config('spark.executor.memory', '8g') \
     .config('spark.executor.cores', '4') \
-    .config('spark.driver.memory', '4g') \
+    .config('spark.driver.memory', '8g') \
     .config('spark.sql.shuffle.partitions', '200') \
     .getOrCreate()
 
