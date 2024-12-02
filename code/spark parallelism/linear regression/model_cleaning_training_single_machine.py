@@ -1,119 +1,112 @@
 import os
 import time
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, mean, when
-from pyspark.ml.feature import StringIndexer, VectorAssembler, StandardScaler
-from pyspark.ml.regression import LinearRegression
-from pyspark.ml.evaluation import RegressionEvaluator
-
-# Initialize SparkSession in local mode
-spark = SparkSession.builder \
-    .appName('SingleMachineDataProcessing') \
-    .master("local[*]").config('spark.executor.memory', '4g').config('spark.driver.memory', '4g').config('spark.sql.shuffle.partitions', '1').getOrCreate()
+import pandas as pd
+from sklearn.model_selection import KFold
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.metrics import mean_squared_error
 
 # File path
 file_path = "concatenated_data.csv"
-parquet_path = "data_single_machine.parquet"
 
 # Data Cleaning Function
 def clean(df):
     """
     Cleans the input DataFrame by:
-    - Imputing missing values in numerical columns with the mean if less than 40% missing.
+    - Imputing missing values in numerical columns with the mean.
     - Dropping numerical columns with more than 40% missing values.
-    - Encoding categorical columns using StringIndexer.
+    - Encoding categorical columns using label encoding.
     """
+    # Drop columns with more than 40% missing values
     drop_threshold = 0.6  # 60% missing threshold for dropping columns
-    row_drop_threshold = 0.05  # 5% missing threshold for dropping rows
-    total_rows = df.count()
+    row_count = len(df)
+    df = df.dropna(axis=1, thresh=int(drop_threshold * row_count))
+    
+    # Impute missing numerical values with mean
+    for col in df.select_dtypes(include=['float64', 'int64']).columns:
+        df[col].fillna(df[col].mean(), inplace=True)
 
-    # Identify columns
-    numerical_cols = [col_name for col_name, dtype in df.dtypes if dtype in ('int', 'double', 'float')]
-    categorical_cols = [col_name for col_name, dtype in df.dtypes if dtype == 'string']
-
-    drop_col_threshold = drop_threshold * total_rows
-    row_drop_col_threshold = row_drop_threshold * total_rows
-
-    # Handle numerical columns
-    for col_name in numerical_cols:
-        missing_count = df.filter(col(col_name).isNull()).count()
-        if missing_count > drop_col_threshold:
-            df = df.drop(col_name)  # Drop column
-        elif missing_count <= row_drop_col_threshold:
-            df = df.filter(col(col_name).isNotNull())  # Drop rows
-        else:
-            mean_value = df.select(mean(col(col_name))).collect()[0][0]
-            df = df.withColumn(col_name, when(col(col_name).isNull(), mean_value).otherwise(col(col_name)))
-
-    # Handle categorical columns
-    for col_name in categorical_cols:
-        indexer = StringIndexer(inputCol=col_name, outputCol=f"{col_name}_indexed", handleInvalid="skip")
-        df = indexer.fit(df).transform(df)
-        df = df.drop(col_name).withColumnRenamed(f"{col_name}_indexed", col_name)
+    # Label encode categorical columns
+    for col in df.select_dtypes(include=['object', 'category']).columns:
+        le = LabelEncoder()
+        df[col] = le.fit_transform(df[col].astype(str))
+    
+    # Optimize memory usage by converting numerical columns to float32
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = df[col].astype('float32')
     
     return df
 
 # Load Data
-if not os.path.exists(parquet_path):
-    df = spark.read.csv(file_path, header=True, inferSchema=True)
-    df.write.parquet(parquet_path)
-df = spark.read.parquet(parquet_path)
+if not os.path.exists(file_path):
+    raise FileNotFoundError(f"File {file_path} not found!")
 
-# Data Cleaning
+# Read the CSV into a Pandas DataFrame
+df = pd.read_csv(file_path)
+
+# Start timing
 start_time = time.time()
+
+# Clean the DataFrame
 clean_df = clean(df)
 cleaning_time = time.time() - start_time
-print(f"Data cleaning completed in single-machine mode in {cleaning_time:.2f} seconds.")
+print(f"Data cleaning completed in single-threaded mode in {cleaning_time:.2f} seconds.")
 
-# Model Training
-def train_and_predict(df, target_column='DepDelay'):
+# Model Training with Cross-Validation
+def train_and_cross_validate(df, target_column='DepDelay', n_splits=5):
     """
-    Trains a Linear Regression model to predict the target column using PySpark.
+    Trains a Linear Regression model using k-fold cross-validation and evaluates performance.
     """
     start_time = time.time()
 
-    # Select features (all columns except the target)
-    feature_columns = [col for col in df.columns if col != target_column]
-    
-    # Assemble features into a single vector
-    assembler = VectorAssembler(inputCols=feature_columns, outputCol="features")
-    df = assembler.transform(df)
+    # Separate features and target
+    X = df.drop(columns=[target_column])
+    y = df[target_column]
 
-    # Scale features
-    scaler = StandardScaler(inputCol="features", outputCol="scaledFeatures", withStd=True, withMean=True)
-    scaler_model = scaler.fit(df)
-    df = scaler_model.transform(df)
-    
-    # Split data into train and test sets
-    train_df, test_df = df.randomSplit([0.8, 0.2], seed=42)
+    # Initialize k-fold cross-validation
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    fold = 1
 
-    # Train Linear Regression model
-    lr = LinearRegression(featuresCol="scaledFeatures", labelCol=target_column, predictionCol="prediction")
-    lr_model = lr.fit(train_df)
+    # Initialize lists to store validation metrics
+    rmse_list = []
 
-    # Make predictions on the test set
-    predictions = lr_model.transform(test_df)
+    # Perform cross-validation
+    for train_index, test_index in kf.split(X):
+        print(f"Training fold {fold}/{n_splits}...")
+        # Split into train and test sets for this fold
+        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
 
-    # Evaluate the model
-    evaluator = RegressionEvaluator(labelCol=target_column, predictionCol="prediction", metricName="rmse")
-    rmse = evaluator.evaluate(predictions)
-    print(f"Root Mean Squared Error (RMSE) on test data: {rmse:.2f}")
+        # Scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        # Train Linear Regression model
+        lr = LinearRegression()
+        lr.fit(X_train_scaled, y_train)
+
+        # Make predictions on the test set
+        y_pred = lr.predict(X_test_scaled)
+
+        # Evaluate the model
+        rmse = mean_squared_error(y_test, y_pred, squared=False)
+        rmse_list.append(rmse)
+
+        print(f"Fold {fold} - RMSE: {rmse:.2f}")
+        fold += 1
+
+    # Calculate average metrics across all folds
+    avg_rmse = sum(rmse_list) / n_splits
+
+    print("\nCross-Validation Results:")
+    print(f"Average RMSE: {avg_rmse:.2f}")
 
     # End timing
     end_time = time.time()
-    # print(f"Model training completed in single-machine mode in {end_time - start_time:.2f} seconds.")
+    print(f"Training completed in {end_time - start_time:.2f} seconds.")
     
-    return predictions
+    return avg_rmse
 
-# Train the model
-predictions = train_and_predict(clean_df)
-training_time = time.time() - start_time
-print(f"Model training completed in {training_time:.2f} seconds.")
-
-# Validation Analysis
-evaluator = RegressionEvaluator(labelCol="DepDelay", predictionCol="prediction", metricName="rmse")
-rmse = evaluator.evaluate(predictions)
-print(f"Validation RMSE: {rmse:.2f}")
-
-# Stop SparkSession
-spark.stop()
+# Perform training with cross-validation
+avg_rmse = train_and_cross_validate(clean_df)
