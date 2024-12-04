@@ -3,7 +3,7 @@ Forecasting flight delays is a persistent challenge in the airline industry, whe
 The U.S. Flight Delay Dataset presents a unique opportunity to address this issue, containing rich information such as departure and arrival airports, delay durations, and airline-specific data. However, the computational demands of analyzing and modeling these large datasets pose significant challenges, including:
 Processing and transforming extensive data volumes in reasonable timeframes.
 Training machine learning models efficiently without compromising accuracy.
-The objective of this project is to leverage Apache Spark’s MLlib to harness the power of parallel computing for flight delay prediction. By distributing the workload across multiple processors, we aim to:
+The objective of this project is to leverage Apache Spark’s MLlib and Dask to harness the power of parallel computing for flight delay prediction. By distributing the workload across multiple processors, we aim to:
 Reduce processing time for data transformations and model training.
 Enhance the predictive accuracy of machine learning models through efficient parameter tuning.
 Provide real-time delay predictions to support decision-making in the aviation industry.
